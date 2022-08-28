@@ -64,7 +64,7 @@ CLIENT_SRCS = \
 noinst_PROGRAMS =
 
 if ENABLE_EXAMPLE_OPENSSL
-noinst_PROGRAMS += client server h09client h09server simpleclient
+noinst_PROGRAMS += client server h09client h09server simpleclient qperfserver
 
 simpleclient_CPPFLAGS = ${AM_CPPFLAGS} \
 	@JEMALLOC_CFLAGS@ @OPENSSL_CFLAGS@ -DWITH_EXAMPLE_OPENSSL
@@ -109,6 +109,14 @@ h09server_SOURCES = h09server.cc h09server.h ${SERVER_SRCS} \
 	tls_server_session_openssl.cc tls_server_session_openssl.h \
 	tls_session_base_openssl.cc tls_session_base_openssl.h \
 	util_openssl.cc
+
+qperfserver_CPPFLAGS = ${AM_CPPFLAGS} \
+	@JEMALLOC_CFLAGS@ @OPENSSL_CFLAGS@ -DWITH_EXAMPLE_OPENSSL
+qperfserver_LDADD = ${LDADD} \
+	$(top_builddir)/crypto/openssl/libngtcp2_crypto_openssl.la \
+	@OPENSSL_LIBS@ \
+	@JEMALLOC_LIBS@
+qperfserver_SOURCES = qperfserver.c qperfserver.h 
 endif # ENABLE_EXAMPLE_OPENSSL
 
 if ENABLE_EXAMPLE_GNUTLS
