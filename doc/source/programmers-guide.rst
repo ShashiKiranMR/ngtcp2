@@ -20,10 +20,11 @@ list of TLS stacks which are supposed to provide such interface and
 for which we provide crypto helper libraries:
 
 * `OpenSSL with QUIC support
-  <https://github.com/quictls/openssl/tree/OpenSSL_1_1_1n+quic>`_
+  <https://github.com/quictls/openssl/tree/OpenSSL_1_1_1q+quic>`_
 * GnuTLS >= 3.7.2
 * BoringSSL
 * Picotls
+* wolfSSL
 
 Creating ngtcp2_conn object
 ---------------------------
@@ -183,6 +184,11 @@ supported TLS stack:
   * `ngtcp2_crypto_picotls_configure_client_session`
   * `ngtcp2_crypto_picotls_configure_server_session`
 
+- wolfSSL
+
+  * `ngtcp2_crypto_wolfssl_configure_client_context`
+  * `ngtcp2_crypto_wolfssl_configure_server_context`
+
 They make the minimal QUIC specific changes to TLS stack object.  See
 the ngtcp2 crypto API header files for each supported TLS stack.  In
 order to make these functions work, we require that a pointer to
@@ -319,21 +325,43 @@ Closing connection abruptly
 
 In order to close QUIC connection abruptly, call
 `ngtcp2_conn_write_connection_close()` and get a terminal packet.
-Sending it closes the connection abruptly.
+After the call, the connection enters the closing state.
+
+The closing and draining state
+------------------------------
+
+After the successful call of `ngtcp2_conn_write_connection_close()`,
+the connection enters the closing state.  When
+`ngtcp2_conn_read_pkt()` returns :macro:`NGTCP2_ERR_DRAINING`, the
+connection has entered the draining state.  In these states,
+`ngtcp2_conn_writev_stream()` and `ngtcp2_conn_read_pkt()` return an
+error (either :macro:`NGTCP2_ERR_CLOSING` or
+:macro:`NGTCP2_ERR_DRAINING` depending on the state).
+`ngtcp2_conn_write_connection_close()` returns 0 in these states.  If
+an application needs to send a packet containing CONNECTION_CLOSE
+frame in the closing state, resend the packet produced by the first
+call of `ngtcp2_conn_write_connection_close()`.  Therefore, after a
+connection has entered one of these states, the application can
+discard :type:`ngtcp2_conn` object.  The closing and draining state
+should persist at least 3 times the current PTO.
 
 Error handling in general
 -------------------------
 
 In general, when error is returned from the ngtcp2 library function,
 call `ngtcp2_conn_write_connection_close()` to get terminal packet.
-Sending it finishes QUIC connection.
+If the successful call of the function creates non-empty packet, the
+QUIC connection enters the closing state.
 
 If :macro:`NGTCP2_ERR_DROP_CONN` is returned from
 `ngtcp2_conn_read_pkt`, a connection should be dropped without calling
 `ngtcp2_conn_write_connection_close()`.  Similarly, if
 :macro:`NGTCP2_ERR_IDLE_CLOSE` is returned from
 `ngtcp2_conn_handle_expiry`, a connection should be dropped without
-calling `ngtcp2_conn_write_connection_close()`.
+calling `ngtcp2_conn_write_connection_close()`.  If
+:macro:`NGTCP2_ERR_DRAINING` is returned from `ngtcp2_conn_read_pkt`,
+a connection has entered the draining state, and no further packet
+transmission is allowed.
 
 The following error codes must be considered as transitional, and
 application should keep connection alive:

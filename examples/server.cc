@@ -89,7 +89,7 @@ constexpr char NGTCP2_SERVER[] = "nghttp3/ngtcp2 server";
 
 namespace {
 std::string make_status_body(unsigned int status_code) {
-  auto status_string = std::to_string(status_code);
+  auto status_string = util::format_uint(status_code);
   auto reason_phrase = http::get_reason_phrase(status_code);
 
   std::string body;
@@ -104,7 +104,7 @@ std::string make_status_body(unsigned int status_code) {
   body += "</h1><hr><address>";
   body += NGTCP2_SERVER;
   body += " at port ";
-  body += std::to_string(config.port);
+  body += util::format_uint(config.port);
   body += "</address>";
   body += "</body></html>";
   return body;
@@ -324,7 +324,7 @@ nghttp3_ssize dyn_read_data(nghttp3_conn *conn, int64_t stream_id,
     *pflags |= NGHTTP3_DATA_FLAG_EOF;
     if (config.send_trailers) {
       *pflags |= NGHTTP3_DATA_FLAG_NO_END_STREAM;
-      auto stream_id_str = std::to_string(stream_id);
+      auto stream_id_str = util::format_uint(stream_id);
       std::array<nghttp3_nv, 1> trailers{
           util::make_nv("x-ngtcp2-stream-id", stream_id_str),
       };
@@ -358,8 +358,8 @@ int Stream::send_status_response(nghttp3_conn *httpconn,
                                  const std::vector<HTTPHeader> &extra_headers) {
   status_resp_body = make_status_body(status_code);
 
-  auto status_code_str = std::to_string(status_code);
-  auto content_length_str = std::to_string(status_resp_body.size());
+  auto status_code_str = util::format_uint(status_code);
+  auto content_length_str = util::format_uint(status_resp_body.size());
 
   std::vector<nghttp3_nv> nva(4 + extra_headers.size());
   nva[0] = util::make_nv(":status", status_code_str);
@@ -387,7 +387,7 @@ int Stream::send_status_response(nghttp3_conn *httpconn,
   }
 
   if (config.send_trailers) {
-    auto stream_id_str = std::to_string(stream_id);
+    auto stream_id_str = util::format_uint(stream_id);
     std::array<nghttp3_nv, 1> trailers{
         util::make_nv("x-ngtcp2-stream-id", stream_id_str),
     };
@@ -474,7 +474,7 @@ int Stream::start_response(nghttp3_conn *httpconn) {
     content_type = "application/octet-stream";
   }
 
-  auto content_length_str = std::to_string(content_length);
+  auto content_length_str = util::format_uint(content_length);
 
   std::array<nghttp3_nv, 5> nva{
       util::make_nv(":status", "200"),
@@ -534,7 +534,7 @@ int Stream::start_response(nghttp3_conn *httpconn) {
   }
 
   if (config.send_trailers && dyn_len == -1) {
-    auto stream_id_str = std::to_string(stream_id);
+    auto stream_id_str = util::format_uint(stream_id);
     std::array<nghttp3_nv, 1> trailers{
         util::make_nv("x-ngtcp2-stream-id", stream_id_str),
     };
@@ -1164,9 +1164,6 @@ int Handler::http_stop_sending(int64_t stream_id, uint64_t app_error_code) {
       rv != 0) {
     std::cerr << "ngtcp2_conn_shutdown_stream_read: " << ngtcp2_strerror(rv)
               << std::endl;
-    if (rv == NGTCP2_ERR_STREAM_NOT_FOUND) {
-      return 0;
-    }
     return -1;
   }
   return 0;
@@ -1190,9 +1187,6 @@ int Handler::http_reset_stream(int64_t stream_id, uint64_t app_error_code) {
       rv != 0) {
     std::cerr << "ngtcp2_conn_shutdown_stream_write: " << ngtcp2_strerror(rv)
               << std::endl;
-    if (rv == NGTCP2_ERR_STREAM_NOT_FOUND) {
-      return 0;
-    }
     return -1;
   }
   return 0;
@@ -1693,27 +1687,11 @@ int Handler::write_streams() {
       switch (nwrite) {
       case NGTCP2_ERR_STREAM_DATA_BLOCKED:
         assert(ndatalen == -1);
-        if (auto rv = nghttp3_conn_block_stream(httpconn_, stream_id);
-            rv != 0) {
-          std::cerr << "nghttp3_conn_block_stream: " << nghttp3_strerror(rv)
-                    << std::endl;
-          ngtcp2_connection_close_error_set_application_error(
-              &last_error_, nghttp3_err_infer_quic_app_error_code(rv), nullptr,
-              0);
-          return handle_error();
-        }
+        nghttp3_conn_block_stream(httpconn_, stream_id);
         continue;
       case NGTCP2_ERR_STREAM_SHUT_WR:
         assert(ndatalen == -1);
-        if (auto rv = nghttp3_conn_shutdown_stream_write(httpconn_, stream_id);
-            rv != 0) {
-          std::cerr << "nghttp3_conn_shutdown_stream_write: "
-                    << nghttp3_strerror(rv) << std::endl;
-          ngtcp2_connection_close_error_set_application_error(
-              &last_error_, nghttp3_err_infer_quic_app_error_code(rv), nullptr,
-              0);
-          return handle_error();
-        }
+        nghttp3_conn_shutdown_stream_write(httpconn_, stream_id);
         continue;
       case NGTCP2_ERR_WRITE_MORE:
         assert(ndatalen >= 0);
@@ -2455,19 +2433,17 @@ int Server::on_read(Endpoint &ep) {
       continue;
     }
 
-    uint32_t version;
-    const uint8_t *dcid, *scid;
-    size_t dcidlen, scidlen;
+    ngtcp2_version_cid vc;
 
-    switch (auto rv = ngtcp2_pkt_decode_version_cid(&version, &dcid, &dcidlen,
-                                                    &scid, &scidlen, buf.data(),
-                                                    nread, NGTCP2_SV_SCIDLEN);
+    switch (auto rv = ngtcp2_pkt_decode_version_cid(&vc, buf.data(), nread,
+                                                    NGTCP2_SV_SCIDLEN);
             rv) {
     case 0:
       break;
     case NGTCP2_ERR_VERSION_NEGOTIATION:
-      send_version_negotiation(version, scid, scidlen, dcid, dcidlen, ep,
-                               *local_addr, &su.sa, msg.msg_namelen);
+      send_version_negotiation(vc.version, vc.scid, vc.scidlen, vc.dcid,
+                               vc.dcidlen, ep, *local_addr, &su.sa,
+                               msg.msg_namelen);
       continue;
     default:
       std::cerr << "Could not decode version and CID from QUIC packet header: "
@@ -2475,7 +2451,7 @@ int Server::on_read(Endpoint &ep) {
       continue;
     }
 
-    auto dcid_key = util::make_cid_key(dcid, dcidlen);
+    auto dcid_key = util::make_cid_key(vc.dcid, vc.dcidlen);
 
     auto handler_it = handlers_.find(dcid_key);
     if (handler_it == std::end(handlers_)) {

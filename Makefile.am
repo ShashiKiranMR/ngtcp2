@@ -42,6 +42,7 @@ EXTRA_DIST = \
 	cmake/FindCUnit.cmake \
 	cmake/FindLibev.cmake \
 	cmake/FindLibnghttp3.cmake \
+	cmake/Findwolfssl.cmake \
 	cmake/Version.cmake
 
 # Format source files using clang-format.  Don't format source files
@@ -53,5 +54,6 @@ clang-format:
 	$${CLANGFORMAT} -i lib/*.{c,h} tests/*.{c,h} lib/includes/ngtcp2/*.h \
 	crypto/*.{c,h} \
 	crypto/openssl/*.c crypto/gnutls/*.c crypto/boringssl/*.c \
+	crypto/wolfssl/*.c \
 	crypto/includes/ngtcp2/*.h \
 	examples/*.{cc,c,h}

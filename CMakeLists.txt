@@ -28,11 +28,11 @@ cmake_minimum_required(VERSION 3.1)
 cmake_policy(SET CMP0063 NEW)
 
 # XXX using 0.1.90 instead of 0.2.0-DEV
-project(ngtcp2 VERSION 0.6.90)
+project(ngtcp2 VERSION 0.8.90)
 
 # See versioning rule:
 #  https://www.gnu.org/software/libtool/manual/html_node/Updating-version-info.html
-set(LT_CURRENT  5)
+set(LT_CURRENT  7)
 set(LT_REVISION 0)
 set(LT_AGE      0)
 
@@ -43,6 +43,10 @@ set(CRYPTO_OPENSSL_LT_AGE 1)
 set(CRYPTO_GNUTLS_LT_CURRENT 3)
 set(CRYPTO_GNUTLS_LT_REVISION 0)
 set(CRYPTO_GNUTLS_LT_AGE 1)
+
+set(CRYPTO_WOLFSSL_LT_CURRENT 0)
+set(CRYPTO_WOLFSSL_LT_REVISION 0)
+set(CRYPTO_WOLFSSL_LT_AGE 0)
 
 set(CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake" "${CMAKE_MODULE_PATH}")
 include(Version)
@@ -59,6 +63,11 @@ math(EXPR CRYPTO_GNUTLS_LT_SOVERSION
   "${CRYPTO_GNUTLS_LT_CURRENT} - ${CRYPTO_GNUTLS_LT_AGE}")
 set(CRYPTO_GNUTLS_LT_VERSION
   "${CRYPTO_GNUTLS_LT_SOVERSION}.${CRYPTO_GNUTLS_LT_AGE}.${CRYPTO_GNUTLS_LT_REVISION}")
+
+math(EXPR CRYPTO_WOLFSSL_LT_SOVERSION
+  "${CRYPTO_WOLFSSL_LT_CURRENT} - ${CRYPTO_WOLFSSL_LT_AGE}")
+set(CRYPTO_WOLFSSL_LT_VERSION
+  "${CRYPTO_WOLFSSL_LT_SOVERSION}.${CRYPTO_WOLFSSL_LT_AGE}.${CRYPTO_WOLFSSL_LT_REVISION}")
 
 set(PACKAGE_VERSION     "${PROJECT_VERSION}")
 HexVersion(PACKAGE_VERSION_NUM ${PROJECT_VERSION_MAJOR} ${PROJECT_VERSION_MINOR} ${PROJECT_VERSION_PATCH})
@@ -91,6 +100,9 @@ if(ENABLE_GNUTLS)
 endif()
 if(ENABLE_OPENSSL)
   find_package(OpenSSL 1.1.1)
+endif()
+if(ENABLE_WOLFSSL)
+  find_package(wolfssl 5.4.0)
 endif()
 find_package(Libev 4.11)
 find_package(Libnghttp3 0.0.0)
@@ -190,6 +202,28 @@ else()
   set(HAVE_PICOTLS FALSE)
   set(PICOTLS_INCLUDE_DIRS  "")
   set(PICOTLS_LIBRARIES     "")
+endif()
+
+# wolfSSL (required for libngtcp2_crypto_wolfssl)
+if(ENABLE_WOLFSSL)
+  cmake_push_check_state()
+  set(CMAKE_REQUIRED_INCLUDES   "${WOLFSSL_INCLUDE_DIR}")
+  set(CMAKE_REQUIRED_LIBRARIES  "${WOLFSSL_LIBRARIES}")
+  check_symbol_exists(wolfSSL_is_quic "wolfssl/options.h;wolfssl/ssl.h;wolfssl/quic.h"
+    HAVE_WOLFSSL_IS_QUIC)
+  if(NOT HAVE_WOLFSSL_IS_QUIC)
+    message(WARNING "Disabling wolfSSL because wolfSSL_is_quic not found in ${CMAKE_REQUIRED_LIBRARIES}")
+  endif()
+  cmake_pop_check_state()
+endif()
+if(ENABLE_WOLFSSL AND WOLFSSL_FOUND)
+  set(WOLFSSL_INCLUDE_DIRS  ${WOLFSSL_INCLUDE_DIR})
+  set(HAVE_WOLFSSL TRUE)
+  set(HAVE_CRYPTO TRUE)
+else()
+  set(HAVE_WOLFSSL FALSE)
+  set(WOLFSSL_INCLUDE_DIRS  "")
+  set(WOLFSSL_LIBRARIES     "")
 endif()
 
 # Checks for header files.
@@ -396,4 +430,5 @@ message(STATUS "summary of build options:
       GnuTLS:         ${HAVE_GNUTLS} (LIBS='${GNUTLS_LIBRARIES}')
       BoringSSL:      ${HAVE_BORINGSSL} (LIBS='${BORINGSSL_LIBRARIES}')
       Picotls:        ${HAVE_PICOTLS} (LIBS='${PICOTLS_LIBRARIES}')
+      wolfSSL:        ${HAVE_WOLFSSL} (LIBS='${WOLFSSL_LIBRARIES}')
 ")

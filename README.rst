@@ -30,9 +30,9 @@ Requirements
 ------------
 
 The libngtcp2 C library itself does not depend on any external
-libraries.  The example client, and server are written in C++17, and
-should compile with the modern C++ compilers (e.g., clang >= 8.0, or
-gcc >= 8.0).
+libraries.  The example client, and server are written in C++20, and
+should compile with the modern C++ compilers (e.g., clang >= 11.0, or
+gcc >= 11.0).
 
 The following packages are required to configure the build system:
 
@@ -58,8 +58,9 @@ directory require at least one of the following TLS backends:
 - `OpenSSL with QUIC support
   <https://github.com/quictls/openssl/tree/OpenSSL_1_1_1q+quic>`_
 - GnuTLS >= 3.7.2
-- BoringSSL (commit 27ffcc6e19bbafddf1b59ec0bc6df2904de7eb2c)
-- Picotls (commit c4b9f6b834fac7533020565c77bd3af5ca2fae6c)
+- BoringSSL (commit a6d321b11fa80496b7c8ae6405468c212d4f5c87)
+- Picotls (commit 7970614ad049d194fe1691bdf0cc66c6930a3a2f)
+- wolfSSL (commit 3f7d56d957ac7418abab13540af5e4a6c8ba364a)
 
 Build from git
 --------------
@@ -174,8 +175,9 @@ available crypto helper libraries are:
 - libngtcp2_crypto_gnutls: Use GnuTLS as TLS backend
 - libngtcp2_crypto_boringssl: Use BoringSSL as TLS backend
 - libngtcp2_crypto_picotls: Use Picotls as TLS backend
+- libngtcp2_crypto_wolfssl: Use wolfSSL as TLS backend
 
-Because BoringSSL and Picotls are an unversioned product, we only
+Because BoringSSL, Picotls and wolfSSL are an unversioned product, we only
 tested their particular revision.  See Requirements section above.
 
 We use Picotls with OpenSSL as crypto backend.  It does not work with
@@ -193,6 +195,8 @@ if their corresponding crypto helper library is built:
 - bsslserver: BoringSSL server
 - ptlsclient: Picotls client
 - ptlsserver: Picotls server
+- wsslclient: wolfSSL client
+- wsslserver: wolfSSL server
 
 QUIC protocol extensions
 -------------------------
@@ -202,7 +206,7 @@ The library implements the following QUIC protocol extensions:
 - `An Unreliable Datagram Extension to QUIC
   <https://datatracker.ietf.org/doc/html/rfc9221>`_
 - `Greasing the QUIC Bit
-  <https://datatracker.ietf.org/doc/html/draft-ietf-quic-bit-grease>`_
+  <https://datatracker.ietf.org/doc/html/rfc9287>`_
 - `Compatible Version Negotiation for QUIC
   <https://datatracker.ietf.org/doc/html/draft-ietf-quic-version-negotiation>`_
 - `QUIC Version 2
@@ -228,7 +232,7 @@ analyze QUIC traffic using the following steps:
 
 3. Set Pre-Master-Secret logfile
 
-   Go to *Preferences->Protocols->TLS* add set the *Pre-Master-Secret
+   Go to *Preferences->Protocols->TLS* and set the *Pre-Master-Secret
    log file* to the same value that was specified for *SSLKEYLOGFILE*.
 
 4. Choose the correct network interface for capturing
