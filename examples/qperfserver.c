@@ -133,18 +133,73 @@ int get_tlsctx() {
     return 0;
 }
 
+struct sockaddr *msghdr_get_local_addr(msghdr *msg, int family) {
+}
+
 static void server_read_cb(EV_P_ ev_io *w, int revents) {
     printf("Got something on the socket to read\n");
-    /*
-    sockaddr_union su;
     uint8_t buf[4096];
-    ngtcp2_pkt_hd hd;
-    ngtcp2_pkt_info pi;
-
+    sockaddr_union su;
     iovec msg_iov;
     msg_iov.iov_base = buf;
     msg_iov.iov_len = sizeof(buf);
-    */
+    
+    ssize_t bytes_received;
+    msghdr msg{};
+    msg.msg_name = &su;
+    msg.msg_iov = &msg_iov;
+    msg.msg_iovlen = 1;
+
+    ngtcp2_version_cid vc;
+    ngtcp2_pkt_hd hd;
+    struct sockaddr *local_addr;
+
+    int rv;
+
+    while ((bytes_received = recvmsg(w->fd, &msg, 0)) != -1) {
+        printf("Bytes received = %d\n", bytes_received);
+
+        /*TBD: Decoding might not be needed as we don't care about the data?*/
+        rv = ngtcp2_pkt_decode_version_cid(&vc, buf, nread, NGTCP2_SV_SCIDLEN);
+        switch (rv) {
+            case 0:
+                break;
+            case NGTCP2_ERR_VERSION_NEGOTIATION:
+                printf("Version negotiation needed\n");
+                continue;
+            default:
+                printf("Could not decode version and CID from QUIC packet header\n");
+                continue;
+        }
+
+        rv = ngtcp2_accept(&hd, buf, bytes_received);
+        switch (rv) {
+            case 0:
+                break;
+            case NGTCP2_ERR_RETRY:
+                printf("Retry needed\n");
+                continue;
+            default:
+                printf("Unexpected packet received\n");
+                continue;
+        }
+
+        /*Append this connection to the connection array and start
+         * sending response on every connection*/
+        local_addr = msghdr_get_local_addr(&msg, su.storage.ss_family);
+        
+        ngtcp2_path path = {
+            {
+                (struct sockaddr *)local_addr,
+                local_addrlen,
+            },
+            {
+                (struct sockaddr *)remote_addr,
+                remote_addrlen,
+            },
+            NULL,
+        };
+    }
 }
 
 int run_server (const char *port, bool gso, const char *logfile) {
