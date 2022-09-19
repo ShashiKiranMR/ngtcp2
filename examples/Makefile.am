@@ -110,17 +110,13 @@ h09server_SOURCES = h09server.cc h09server.h ${SERVER_SRCS} \
 	tls_session_base_openssl.cc tls_session_base_openssl.h \
 	util_openssl.cc
 
-qperfserver_CPPFLAGS = ${AM_CPPFLAGS} \
-					   @JEMALLOC_CFLAGS@ @OPENSSL_CFLAGS@ -DWITH_EXAMPLE_OPENSSL
-qperfserver_LDADD = ${LDADD} \
-					$(top_builddir)/crypto/openssl/libngtcp2_crypto_openssl.la \
-					@OPENSSL_LIBS@ \
-					@JEMALLOC_LIBS@
+qperfserver_CPPFLAGS = ${client_CPPFLAGS}
+qperfserver_LDADD = ${client_LDADD}
 qperfserver_SOURCES = qperfserver.c qperfserver.h
 endif # ENABLE_EXAMPLE_OPENSSL
 
 if ENABLE_EXAMPLE_GNUTLS
-noinst_PROGRAMS += gtlsclient gtlsserver gtlssimpleclient
+noinst_PROGRAMS += gtlsclient gtlsserver gtlssimpleclient gtlsqperfserver
 
 gtlssimpleclient_CPPFLAGS = ${AM_CPPFLAGS} \
 	@JEMALLOC_CFLAGS@ @GNUTLS_CFLAGS@ -DWITH_EXAMPLE_OPENSSL
@@ -151,10 +147,16 @@ gtlsserver_SOURCES = server.cc server.h ${SERVER_SRCS} \
 	tls_server_session_gnutls.cc tls_server_session_gnutls.h \
 	tls_session_base_gnutls.cc tls_session_base_gnutls.h \
 	util_gnutls.cc
+
+gtlsqperfserver_CPPFLAGS = ${gtlsclient_CPPFLAGS}
+gtlsqperfserver_LDADD = ${gtlsclient_LDADD} \
+	$(top_builddir)/crypto/gnutls/libngtcp2_crypto_gnutls.la \
+	@GNUTLS_LIBS@
+gtlsqperfserver_SOURCES = qperfserver.c qperfserver.h
 endif # ENABLE_EXAMPLE_GNUTLS
 
 if ENABLE_EXAMPLE_BORINGSSL
-noinst_PROGRAMS += bsslclient bsslserver
+noinst_PROGRAMS += bsslclient bsslserver bsslqperfserver
 
 bsslclient_CPPFLAGS = ${AM_CPPFLAGS} @BORINGSSL_CFLAGS@ -DWITH_EXAMPLE_BORINGSSL
 bsslclient_LDADD = ${LDADD} \
@@ -173,10 +175,15 @@ bsslserver_SOURCES = server.cc server.h ${SERVER_SRCS} \
 	tls_server_session_boringssl.cc tls_server_session_boringssl.h \
 	tls_session_base_openssl.cc tls_session_base_openssl.h \
 	util_openssl.cc
+
+
+bsslqperfserver_CPPFLAGS = ${bsslclient_CPPFLAGS}
+bsslqperfserver_LDADD = ${bsslclient_LDADD}
+gtlsqperfserver_SOURCES = qperfserver.c qperfserver.h
 endif # ENABLE_EXAMPLE_BORINGSSL
 
 if ENABLE_EXAMPLE_PICOTLS
-noinst_PROGRAMS += ptlsclient ptlsserver
+noinst_PROGRAMS += ptlsclient ptlsserver ptlsqperfserver
 
 ptlsclient_CPPFLAGS = ${AM_CPPFLAGS} @PICOTLS_CFLAGS@ @VANILLA_OPENSSL_CFLAGS@ \
 	-DWITH_EXAMPLE_PICOTLS
@@ -196,6 +203,10 @@ ptlsserver_SOURCES = server.cc server.h ${SERVER_SRCS} \
 	tls_server_session_picotls.cc tls_server_session_picotls.h \
 	tls_session_base_picotls.cc tls_session_base_picotls.h \
 	util_openssl.cc
+
+ptlsqperfserver_CPPFLAGS = ${ptlsclient_CPPFLAGS}
+ptlsqperfserver_LDADD = ${ptlsclient_LDADD}
+ptlsqperfserver_SOURCES = qperfserver.c qperfserver.h
 endif # ENABLE_EXAMPLE_PICOTLS
 
 if HAVE_CUNIT

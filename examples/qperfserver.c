@@ -2,12 +2,21 @@
 
 #include "qperfserver.h"
 
+#include <assert.h>
 #include <ngtcp2/ngtcp2.h>
 #include <ngtcp2/ngtcp2_crypto.h>
 #include <ngtcp2/ngtcp2_crypto_openssl.h>
 #include <openssl/ssl.h>
 #include <openssl/err.h>
 #include <openssl/rand.h>
+
+struct qperf_conn_wrapper {
+    struct ngtcp2_conn *conn;
+    struct ngtcp2_crypto_conn_ref *conn_ref;
+    SSL *ssl;
+    size_t dcidlen;
+    const uint8_t *dcid;
+};
 
 static int server_socket;
 SSL_CTX *server_ctx;
@@ -16,6 +25,11 @@ const char *groups;
 const char *cert = "server.crt";
 const char *key = "server.key";
 const char *sid_ctx = "qperf server";
+static struct qperf_conn_wrapper **conns;
+static size_t num_conns = 0;
+
+static uint8_t null_secret[32];
+static uint8_t null_iv[16];
 
 struct addrinfo *get_address(const char *host, const char *port) {
     struct addrinfo hints;
@@ -120,10 +134,188 @@ int get_tlsctx() {
   
     return 0;
 }
-/*
-struct sockaddr *msghdr_get_local_addr(msghdr *msg, int family) {
+
+struct qperf_conn_wrapper *find_conn(const uint8_t *dcid, size_t dcidlen) {
+    size_t i;
+    
+    for (i=0; i < num_conns; i++) {
+        if (memcmp(dcid, (conns[i])->dcid, dcidlen) == 0) {
+            return conns[i];
+        }
+    }
+    return NULL;
 }
-*/
+
+struct qperf_conn_wrapper *new_conn_wrapper(struct ngtcp2_conn *conn, uint8_t *dcid, size_t dcidlen) {
+    struct qperf_conn_wrapper *conn_wrapper = (struct qperf_conn_wrapper *)malloc(sizeof(struct qperf_conn_wrapper));
+    conn_wrapper->conn                      = conn;
+    conn_wrapper->dcid                      = dcid;
+    conn_wrapper->dcidlen                   = dcidlen;
+    conn_wrapper->conn_ref                  = (struct ngtcp2_crypto_conn_ref *)malloc(sizeof(struct ngtcp2_crypto_conn_ref));
+    return conn_wrapper;
+}
+
+void append_conn(struct qperf_conn_wrapper *conn_wrapper) {
+    ++num_conns;
+    conns                   = realloc(conns, sizeof(struct qperf_conn_wrapper *) * num_conns);
+    conns[num_conns - 1]    = conn_wrapper;
+}
+
+static void addr_init(ngtcp2_sockaddr_in *dest, uint32_t addr, uint16_t port) {
+    memset(dest, 0, sizeof(*dest));    
+    dest->sin_family = AF_INET;
+    dest->sin_port = port;
+    dest->sin_addr.s_addr = addr;
+}
+ 
+void path_init(ngtcp2_path_storage *path, uint32_t local_addr,
+                uint16_t local_port, uint32_t remote_addr,
+                uint16_t remote_port) {
+    ngtcp2_sockaddr_in la, ra;     
+    addr_init(&la, local_addr, local_port);
+    addr_init(&ra, remote_addr, remote_port);           
+    ngtcp2_path_storage_init(path, (ngtcp2_sockaddr *)&la, sizeof(la),
+                            (ngtcp2_sockaddr *)&ra, sizeof(ra), NULL);
+}
+
+static int recv_crypto_data_server(ngtcp2_conn *conn,
+                                   ngtcp2_crypto_level crypto_level,
+                                   uint64_t offset, const uint8_t *data,
+                                   size_t datalen, void *user_data) {
+    return ngtcp2_crypto_recv_crypto_data_cb(conn, crypto_level, offset, data,
+                                                datalen, user_data);
+}
+
+static int null_hp_mask(uint8_t *dest, const ngtcp2_crypto_cipher *hp,
+                        const ngtcp2_crypto_cipher_ctx *hp_ctx,
+                        const uint8_t *sample) {
+    if (ngtcp2_crypto_hp_mask(dest, hp, hp_ctx, sample) != 0)
+        return NGTCP2_ERR_CALLBACK_FAILURE;
+
+    return 0;
+}
+
+static void genrand(uint8_t *dest, size_t destlen,
+                    const ngtcp2_rand_ctx *rand_ctx) {
+    (void)rand_ctx;
+    memset(dest, 0, destlen);
+}
+
+static int get_new_connection_id(ngtcp2_conn *conn, ngtcp2_cid *cid,
+                                 uint8_t *token, size_t cidlen,
+                                 void *user_data) {
+    (void)user_data;
+    memset(cid->data, 0, cidlen);
+    ngtcp2_conn_get_scid(conn, cid);
+    memset(token, 0, NGTCP2_STATELESS_RESET_TOKENLEN);
+    return 0;
+}
+
+static int update_key(ngtcp2_conn *conn, uint8_t *rx_secret, uint8_t *tx_secret,
+                      ngtcp2_crypto_aead_ctx *rx_aead_ctx, uint8_t *rx_iv,
+                      ngtcp2_crypto_aead_ctx *tx_aead_ctx, uint8_t *tx_iv,
+                      const uint8_t *current_rx_secret,
+                      const uint8_t *current_tx_secret, size_t secretlen,
+                      void *user_data) {
+    (void)conn;
+    (void)current_rx_secret;
+    (void)current_tx_secret;
+    (void)user_data;
+    (void)secretlen;
+
+    assert(sizeof(null_secret) == secretlen);
+
+    memset(rx_secret, 0xff, sizeof(null_secret));
+    memset(tx_secret, 0xff, sizeof(null_secret));
+    rx_aead_ctx->native_handle = NULL;
+    memset(rx_iv, 0xff, sizeof(null_iv));
+    tx_aead_ctx->native_handle = NULL;
+    memset(tx_iv, 0xff, sizeof(null_iv));
+
+    return 0;
+}
+
+static void delete_crypto_aead_ctx(ngtcp2_conn *conn,
+                                   ngtcp2_crypto_aead_ctx *aead_ctx,
+                                   void *user_data) {
+  (void)conn;
+  (void)aead_ctx;
+  (void)user_data;
+}
+
+static void delete_crypto_cipher_ctx(ngtcp2_conn *conn,
+                                     ngtcp2_crypto_cipher_ctx *cipher_ctx,
+                                     void *user_data) {
+  (void)conn;
+  (void)cipher_ctx;
+  (void)user_data;
+}
+
+static int get_path_challenge_data(ngtcp2_conn *conn, uint8_t *data,
+                                   void *user_data) {
+  (void)conn;
+  (void)user_data;
+
+  memset(data, 0, NGTCP2_PATH_CHALLENGE_DATALEN);
+
+  return 0;
+}
+
+static int version_negotiation(ngtcp2_conn *conn, uint32_t version,
+                               const ngtcp2_cid *client_dcid, void *user_data) {
+  ngtcp2_crypto_aead_ctx aead_ctx = {0};
+  ngtcp2_crypto_cipher_ctx hp_ctx = {0};
+  (void)client_dcid;
+  (void)user_data;
+
+  ngtcp2_conn_install_vneg_initial_key(conn, version, &aead_ctx, null_iv,
+                                       &hp_ctx, &aead_ctx, null_iv, &hp_ctx,
+                                       sizeof(null_iv));
+
+  return 0;
+}
+
+static void server_default_callbacks(ngtcp2_callbacks *cb) {
+    memset(cb, 0, sizeof(*cb));
+    cb->recv_client_initial = ngtcp2_crypto_recv_client_initial_cb;
+    cb->recv_crypto_data = recv_crypto_data_server;
+    cb->decrypt = ngtcp2_crypto_decrypt_cb;
+    cb->encrypt = ngtcp2_crypto_encrypt_cb;
+    cb->hp_mask = null_hp_mask;
+    cb->rand = genrand;
+    cb->get_new_connection_id = get_new_connection_id;
+    cb->update_key = update_key;
+    cb->delete_crypto_aead_ctx = delete_crypto_aead_ctx;
+    cb->delete_crypto_cipher_ctx = delete_crypto_cipher_ctx;
+    cb->get_path_challenge_data = get_path_challenge_data;
+    cb->version_negotiation = version_negotiation;
+}
+
+void dcid_init(ngtcp2_cid *cid) {
+  static const uint8_t id[] = "\xff\xaa\xaa\xaa\xaa\xaa\xaa\xaa\xaa\xaa\xaa\xaa"
+                              "\xaa\xaa\xaa\xaa\xaa\xff";
+  ngtcp2_cid_init(cid, id, sizeof(id) - 1);
+}
+
+void scid_init(ngtcp2_cid *cid) {
+  static const uint8_t id[] = "\xee\xaa\xaa\xaa\xaa\xaa\xaa\xaa\xaa\xaa\xaa\xaa"
+                              "\xaa\xaa\xaa\xaa\xaa\xee";
+  ngtcp2_cid_init(cid, id, sizeof(id) - 1);
+}
+
+void server_tls_session_init(struct qperf_conn_wrapper *conn_wrapper) {
+    SSL *ssl;
+
+    ngtcp2_conn_set_tls_native_handle(conn_wrapper->conn, server_ctx);
+    ssl = SSL_new(server_ctx);
+    if (!ssl) {
+        printf("Error while creating SSL_new\n");
+        return;
+    }
+    SSL_set_app_data(ssl, conn_wrapper->conn_ref);
+    SSL_set_accept_state(ssl);
+    SSL_set_quic_early_data_enabled(ssl, 1);
+}
 
 static void server_read_cb(EV_P_ ev_io *w, int revents) {
     printf("Got something on the socket to read\n");
@@ -142,8 +334,18 @@ static void server_read_cb(EV_P_ ev_io *w, int revents) {
     uint32_t version;
     const uint8_t *dcid, *scid;
     size_t dcidlen, scidlen;
+    struct ngtcp2_conn *conn = NULL;
+    struct qperf_conn_wrapper *conn_wrapper = NULL;
     ngtcp2_pkt_hd hd;
-    // struct sockaddr *local_addr;
+
+    ngtcp2_callbacks cb;
+    ngtcp2_settings settings;
+    ngtcp2_transport_params params;
+    ngtcp2_cid dcid_n, scid_n;
+    dcid_init(&dcid_n);
+    scid_init(&scid_n);
+    static ngtcp2_path_storage path;
+    struct ngtcp2_pkt_info pi;
 
     int rv;
 
@@ -165,33 +367,51 @@ static void server_read_cb(EV_P_ ev_io *w, int revents) {
                 continue;
         }
 
-        rv = ngtcp2_accept(&hd, buf, bytes_received);
-        switch (rv) {
-            case 0:
-                break;
-            case NGTCP2_ERR_RETRY:
-                printf("Retry needed\n");
-                continue;
-            default:
-                printf("Unexpected packet received\n");
-                continue;
+        conn_wrapper    = find_conn(dcid, dcidlen);
+        if (!conn_wrapper) {
+            printf("New conn found\n");
+            rv = ngtcp2_accept(&hd, buf, bytes_received);
+            switch (rv) {
+                case 0:
+                    break;
+                case NGTCP2_ERR_RETRY:
+                    printf("Retry needed\n");
+                    continue;
+                default:
+                    printf("Unexpected packet received\n");
+                    continue;
+            }
+            /* Get the conn and then append it to conns */
+            path_init(&path, 0, 0, 0, 0);
+            ngtcp2_settings_default(&settings);
+            ngtcp2_transport_params_default(&params);
+            server_default_callbacks(&cb);
+            rv = ngtcp2_conn_server_new(&conn, &dcid_n, &scid_n, &path, version, &cb, 
+                                        &settings, &params, NULL, NULL);
+            conn_wrapper = new_conn_wrapper(conn, dcid, dcidlen);
+            append_conn(conn_wrapper);
+            server_tls_session_init(conn_wrapper);
         }
-
-        /*Append this connection to the connection array and start
-         * sending response on every connection
-        local_addr = msghdr_get_local_addr(&msg, su.storage.ss_family);
-        
-        ngtcp2_path path = {
-            {
-                (struct sockaddr *)local_addr,
-                local_addrlen,
-            },
-            {
-                (struct sockaddr *)remote_addr,
-                remote_addrlen,
-            },
-            NULL,
-        };*/
+        /* Decrypt the pkt */
+        conn = conn_wrapper->conn;
+        rv = ngtcp2_conn_read_pkt(conn, &path, &pi, buf, bytes_received, NULL);
+        if (rv) {
+            printf("Error %d while decrypting pkt\n", rv);
+            switch (rv) {
+                case NGTCP2_ERR_DRAINING:
+                    printf("NGTCP2_ERR_DRAINING\n");
+                    return;
+                case NGTCP2_ERR_RETRY:
+                    printf("NGTCP2_ERR_RETRY\n");
+                    return;
+                case NGTCP2_ERR_DROP_CONN:
+                    printf("NGTCP2_ERR_DROP_CONN\n");
+                    return;
+                case NGTCP2_ERR_CRYPTO:
+                    printf("NGTCP2_ERR_CRYPTO\n");
+                    return;
+            }
+        }
     }
 }
 
