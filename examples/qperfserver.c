@@ -112,6 +112,9 @@ int get_tlsctx() {
     }
 
     SSL_CTX_set_mode(server_ctx, SSL_MODE_RELEASE_BUFFERS);
+
+    /*TBD: should we call SSL_CTX_set_alpn_select_cb ?*/
+
     SSL_CTX_set_default_verify_paths(server_ctx);
   
     if (SSL_CTX_use_PrivateKey_file(server_ctx, key, 
@@ -303,18 +306,38 @@ void scid_init(ngtcp2_cid *cid) {
   ngtcp2_cid_init(cid, id, sizeof(id) - 1);
 }
 
+int generate_secure_random(uint8_t *data, size_t datalen) {
+    if (RAND_bytes(data, (int)datalen) != 1) {
+        return -1;
+    }
+
+    return 0;
+}
+
 void server_tls_session_init(struct qperf_conn_wrapper *conn_wrapper) {
     SSL *ssl;
 
-    ngtcp2_conn_set_tls_native_handle(conn_wrapper->conn, server_ctx);
     ssl = SSL_new(server_ctx);
     if (!ssl) {
         printf("Error while creating SSL_new\n");
         return;
     }
-    SSL_set_app_data(ssl, conn_wrapper->conn_ref);
+    SSL_set_app_data(ssl, conn_wrapper->conn_ref); /* Link ssl <-> conn_ref */
     SSL_set_accept_state(ssl);
     SSL_set_quic_early_data_enabled(ssl, 1);
+    ngtcp2_conn_set_tls_native_handle(conn_wrapper->conn, ssl); /* Link conn <-> ssl */
+}
+
+static ngtcp2_conn *get_conn(ngtcp2_crypto_conn_ref *conn_ref) {
+    struct qperf_conn_wrapper *conn_wrapper = (struct qperf_conn_wrapper *)conn_ref->user_data;
+
+    return conn_wrapper->conn;
+}
+
+void server_conn_ref_setup(struct qperf_conn_wrapper *conn_wrapper) {
+    struct ngtcp2_crypto_conn_ref *conn_ref = conn_wrapper->conn_ref;
+    conn_ref->user_data = conn_wrapper; /* Will be used to get back conn */
+    conn_ref->get_conn  = get_conn;
 }
 
 static void server_read_cb(EV_P_ ev_io *w, int revents) {
@@ -382,18 +405,41 @@ static void server_read_cb(EV_P_ ev_io *w, int revents) {
                     continue;
             }
             /* Get the conn and then append it to conns */
+            scid_n.datalen = NGTCP2_SV_SCIDLEN;
+            if (generate_secure_random(scid_n.data, scid_n.datalen) != 0) {
+                printf("Could not generate connection ID\n");
+                return;
+            }
             path_init(&path, 0, 0, 0, 0);
             ngtcp2_settings_default(&settings);
+            settings.token.base = (uint8_t *)(hd.token.base);
+            settings.token.len = hd.token.len;
             ngtcp2_transport_params_default(&params);
+            params.initial_max_stream_data_bidi_local = 256*1024;
+            params.initial_max_stream_data_bidi_remote = 256*1024;
+            params.initial_max_stream_data_uni = 256*1024;
+            params.initial_max_data = 1*1024*1024;
+            params.initial_max_streams_bidi = 100;
+            params.initial_max_streams_uni = 3;
+            params.max_idle_timeout = 30 * NGTCP2_SECONDS;
+            params.stateless_reset_token_present = 1;
+            params.active_connection_id_limit = 7;
+            params.original_dcid = hd.scid;
+            if (generate_secure_random(params.stateless_reset_token, sizeof(params.stateless_reset_token)) != 0) {
+                printf("Could not generate stateless reset token\n");
+                return;
+            }
             server_default_callbacks(&cb);
-            rv = ngtcp2_conn_server_new(&conn, &dcid_n, &scid_n, &path, version, &cb, 
+            rv = ngtcp2_conn_server_new(&conn, &hd.scid, &scid_n, &path, hd.version, &cb, 
                                         &settings, &params, NULL, NULL);
             conn_wrapper = new_conn_wrapper(conn, dcid, dcidlen);
             append_conn(conn_wrapper);
+            server_conn_ref_setup(conn_wrapper);
             server_tls_session_init(conn_wrapper);
         }
         /* Decrypt the pkt */
         conn = conn_wrapper->conn;
+        printf("Invoking ngtcp2_conn_read_pkt\n");
         rv = ngtcp2_conn_read_pkt(conn, &path, &pi, buf, bytes_received, NULL);
         if (rv) {
             printf("Error %d while decrypting pkt\n", rv);
