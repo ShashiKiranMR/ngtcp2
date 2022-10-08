@@ -1,7 +1,7 @@
 /* qperf server for ngtcp2 which is similar to qperf server for quicly */
 
 #include "qperfserver.h"
-
+#include <time.h>
 #include <assert.h>
 #include <ngtcp2/ngtcp2.h>
 #include <ngtcp2/ngtcp2_crypto.h>
@@ -16,6 +16,13 @@ struct qperf_conn_wrapper {
     SSL *ssl;
     size_t dcidlen;
     const uint8_t *dcid;
+    struct {
+        int64_t stream_id;
+        const uint8_t *data;
+        size_t datalen;                    
+        size_t nwrite;                     
+    } stream;
+    ngtcp2_connection_close_error last_error;
 };
 
 static int server_socket;
@@ -30,6 +37,15 @@ static size_t num_conns = 0;
 
 static uint8_t null_secret[32];
 static uint8_t null_iv[16];
+
+static uint64_t timestamp(void) {
+    struct timespec tp;
+    if (clock_gettime(CLOCK_MONOTONIC, &tp) != 0) {
+        fprintf(stderr, "clock_gettime: %s\n", strerror(errno));
+        exit(EXIT_FAILURE);
+    }       
+    return (uint64_t)tp.tv_sec * NGTCP2_SECONDS + (uint64_t)tp.tv_nsec;
+}
 
 struct addrinfo *get_address(const char *host, const char *port) {
     struct addrinfo hints;
@@ -340,6 +356,71 @@ void server_conn_ref_setup(struct qperf_conn_wrapper *conn_wrapper) {
     conn_ref->get_conn  = get_conn;
 }
 
+int server_send_packet(ev_io *w, struct qperf_conn_wrapper *conn_wrapper, uint8_t *data, size_t datalen) {
+    struct iovec iov = {(uint8_t *)data, datalen};
+    struct msghdr msg = {0};
+    ssize_t nwrite;
+
+    msg.msg_iov = &iov;
+    msg.msg_iovlen = 1;
+    do {
+        nwrite = sendmsg(w->fd, &msg, 0);
+    } while (nwrite == -1 && errno == EINTR);
+
+    if (nwrite == -1) {
+        printf("sendmsg: %s\n", strerror(errno));
+        return -1;
+    }
+    return 0;
+}
+
+void server_send_response(ev_io *w, struct qperf_conn_wrapper *conn_wrapper, uint8_t *rx_buf, ssize_t bytes_received) {
+    ngtcp2_tstamp ts = timestamp();
+    ngtcp2_conn *conn = conn_wrapper->conn;
+    ngtcp2_pkt_info pi;
+    ngtcp2_ssize nwrite;
+    ngtcp2_ssize ndatalen;
+    ngtcp2_path_storage ps;
+    ngtcp2_vec datav;
+    size_t datavcnt;
+    uint8_t tx_buf[1280];
+    uint32_t flags = NGTCP2_WRITE_STREAM_FLAG_MORE;
+    int64_t stream_id = -1;
+
+    printf("Preparing response\n");
+    datav.base  = rx_buf;
+    datav.len   = bytes_received;
+    ngtcp2_path_storage_zero(&ps);
+
+    /* Create QUIC response packet */
+    while (true) {
+        nwrite = ngtcp2_conn_writev_stream(conn, &ps.path, &pi, tx_buf, sizeof(tx_buf), 
+                                    &ndatalen, flags, stream_id, &datav, datavcnt, ts);
+        if (nwrite < 0) {
+            switch (nwrite) {
+                case NGTCP2_ERR_WRITE_MORE:
+                    conn_wrapper->stream.nwrite += (size_t)ndatalen;
+                    continue;
+                default:
+                    printf("ngtcp2_conn_writev_stream: %s\n",
+                            ngtcp2_strerror((int)nwrite));
+                    ngtcp2_connection_close_error_set_transport_error_liberr(
+                            &conn_wrapper->last_error, (int)nwrite, NULL, 0);
+                    return -1;
+            }
+        }
+        if (nwrite == 0) {
+            return 0;
+        }
+        if (ndatalen > 0) {
+            conn_wrapper->stream.nwrite += (size_t)ndatalen;
+        }
+        /* Send the response on the wire */
+        if (server_send_packet(w, conn_wrapper, tx_buf, (size_t)nwrite) != 0)
+            break;
+    }
+}
+
 static void server_read_cb(EV_P_ ev_io *w, int revents) {
     printf("Got something on the socket to read\n");
     uint8_t buf[4096];
@@ -458,6 +539,7 @@ static void server_read_cb(EV_P_ ev_io *w, int revents) {
                     return;
             }
         }
+        server_send_response(w, conn_wrapper, buf, bytes_received);
     }
 }
 
