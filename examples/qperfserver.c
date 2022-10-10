@@ -9,6 +9,7 @@
 #include <openssl/ssl.h>
 #include <openssl/err.h>
 #include <openssl/rand.h>
+#include <netinet/in.h>
 
 struct qperf_conn_wrapper {
     struct ngtcp2_conn *conn;
@@ -26,6 +27,7 @@ struct qperf_conn_wrapper {
 };
 
 static int server_socket;
+struct Address s_addr;
 SSL_CTX *server_ctx;
 const char *ciphers;
 const char *groups;
@@ -66,27 +68,57 @@ struct addrinfo *get_address(const char *host, const char *port) {
 
 static int udp_listen(struct addrinfo *addr) {
     printf("Creating a udp listening socket\n");
-    for(const struct addrinfo *rp = addr; rp != NULL; rp = rp->ai_next) {
-        int s = socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol);
+    int s = -1;
+    const struct addrinfo *rp;
+    for(rp = addr; rp != NULL; rp = rp->ai_next) {
+        s = socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol);
         if(s == -1) {
             continue;
         }
 
         int on = 1;
+        if (setsockopt(s, IPPROTO_IP, IP_PKTINFO, &on, sizeof(on)) != 0) {
+            close(s);
+            printf("setsockopt(IP_PKTINFO) failed");
+            return -1;
+        }
         if (setsockopt(s, SOL_SOCKET, SO_REUSEADDR, &on, sizeof(on)) != 0) {
             close(s);
             printf("setsockopt(SO_REUSEADDR) failed");
             return -1;
         }
+        if (setsockopt(s, IPPROTO_IP, IP_RECVTOS, &on, sizeof(on)) != 0) {
+            close(s);
+            printf("setsockopt(IP_RECVTOS) failed");
+            return -1;
+        }
+        on = IP_PMTUDISC_DO;
+        if (setsockopt(s, IPPROTO_IP, IP_MTU_DISCOVER, &on, sizeof(on)) != 0) {
+            close(s);
+            printf("setsockopt(IP_MTU_DISCOVER) failed");
+            return -1;
+        }
 
-        if(bind(s, rp->ai_addr, rp->ai_addrlen) == 0) {
-            return s; // success
+        if(bind(s, rp->ai_addr, rp->ai_addrlen) != -1) {
+            break; // success
         }
 
         // fail -> close socket and try with next addr
         close(s);
     }
-    return -1;
+    if (!rp) {
+        printf("Could not bind\n");
+        return -1;
+    }
+    socklen_t len = sizeof(s_addr.su.storage);
+    if (getsockname(s, &s_addr.su.sa, &len) == -1) {
+        printf("getsockname: \n", strerror(errno));
+        close(s);
+        return -1;
+    }
+    s_addr.len = len;
+    s_addr.ifindex = 0;
+    return s;
 }
 
 const char *crypto_default_ciphers() {
@@ -356,13 +388,86 @@ void server_conn_ref_setup(struct qperf_conn_wrapper *conn_wrapper) {
     conn_ref->get_conn  = get_conn;
 }
 
-int server_send_packet(ev_io *w, struct qperf_conn_wrapper *conn_wrapper, uint8_t *data, size_t datalen) {
+unsigned int msghdr_get_ecn(struct msghdr *msg, int family) {
+    struct cmsghdr *cmsg;
+    switch (family) {  
+        case AF_INET:
+            for (cmsg = CMSG_FIRSTHDR(msg); cmsg; cmsg = CMSG_NXTHDR(msg, cmsg)) {
+                if (cmsg->cmsg_level == IPPROTO_IP && cmsg->cmsg_type == IP_TOS && cmsg->cmsg_len) {
+                    return *(uint8_t *)(CMSG_DATA(cmsg));
+                }
+            }
+            break;
+    }
+    return 0;
+}
+
+int msghdr_get_local_addr(struct Address *local_addr, struct msghdr *msg, int family) {
+    struct cmsghdr *cmsg;
+    switch (family) {
+    case AF_INET:
+        cmsg = CMSG_FIRSTHDR(msg);
+        for (; cmsg; cmsg = CMSG_NXTHDR(msg, cmsg)) {
+            if (cmsg->cmsg_level == IPPROTO_IP && cmsg->cmsg_type == IP_PKTINFO) {
+                struct in_pktinfo *pktinfo = (struct in_pktinfo *)(CMSG_DATA(cmsg));
+                local_addr->ifindex = pktinfo->ipi_ifindex;
+                local_addr->len = sizeof(local_addr->su.in);
+                struct sockaddr_in *sa = &local_addr->su.in;
+                sa->sin_family = AF_INET;
+                sa->sin_addr = pktinfo->ipi_addr;
+                return 0;
+            }
+        }
+        return 1;
+    }
+    return 1;
+}
+
+int server_send_packet(ev_io *w, struct qperf_conn_wrapper *conn_wrapper,
+        uint32_t ecn, uint8_t *data, size_t datalen, 
+        const ngtcp2_addr *local_addr, const ngtcp2_addr *remote_addr) {
+
     struct iovec iov = {(uint8_t *)data, datalen};
     struct msghdr msg = {0};
-    ssize_t nwrite;
+    ssize_t nwrite, controllen = 0;
+    uint8_t msg_ctrl[64];
+    struct cmsghdr *cm;
 
+    msg.msg_name = (struct sockaddr *)(remote_addr->addr);
+    msg.msg_namelen = remote_addr->addrlen;
     msg.msg_iov = &iov;
     msg.msg_iovlen = 1;
+    memset(msg_ctrl, 0, sizeof(msg_ctrl));
+    msg.msg_control = msg_ctrl;
+    msg.msg_controllen = sizeof(msg_ctrl);
+    cm = CMSG_FIRSTHDR(&msg);
+  
+    switch (local_addr->addr->sa_family) {
+        case AF_INET: {
+            controllen += CMSG_SPACE(sizeof(struct in_pktinfo));
+            cm->cmsg_level = IPPROTO_IP;
+            cm->cmsg_type = IP_PKTINFO;
+            cm->cmsg_len = CMSG_LEN(sizeof(struct in_pktinfo));
+            struct in_pktinfo *pktinfo = (struct in_pktinfo *)(CMSG_DATA(cm));
+            memset(pktinfo, 0, sizeof(struct in_pktinfo));
+            struct sockaddr_in *addrin = (struct sockaddr_in *)(local_addr->addr);
+            pktinfo->ipi_spec_dst = addrin->sin_addr;
+            break;
+        }
+        default:
+            assert(0);
+    }
+    msg.msg_controllen = controllen;
+    switch (local_addr->addr->sa_family) {
+        case AF_INET:
+            if (setsockopt(w->fd, IPPROTO_IP, IP_TOS, &ecn, sizeof(ecn)) == -1) {
+                printf("setsockopt: %s\n", strerror(errno));
+                return -1;
+            }
+            break;
+        default:
+            assert(0);
+    }
     do {
         nwrite = sendmsg(w->fd, &msg, 0);
     } while (nwrite == -1 && errno == EINTR);
@@ -374,7 +479,9 @@ int server_send_packet(ev_io *w, struct qperf_conn_wrapper *conn_wrapper, uint8_
     return 0;
 }
 
-void server_send_response(ev_io *w, struct qperf_conn_wrapper *conn_wrapper, uint8_t *rx_buf, ssize_t bytes_received) {
+void server_send_response(ev_io *w, struct qperf_conn_wrapper *conn_wrapper, 
+        uint32_t ecn, uint8_t *rx_buf, ssize_t bytes_received) {
+    
     ngtcp2_tstamp ts = timestamp();
     ngtcp2_conn *conn = conn_wrapper->conn;
     ngtcp2_pkt_info pi;
@@ -416,7 +523,7 @@ void server_send_response(ev_io *w, struct qperf_conn_wrapper *conn_wrapper, uin
             conn_wrapper->stream.nwrite += (size_t)ndatalen;
         }
         /* Send the response on the wire */
-        if (server_send_packet(w, conn_wrapper, tx_buf, (size_t)nwrite) != 0)
+        if (server_send_packet(w, conn_wrapper, ecn, tx_buf, (size_t)nwrite, &ps.path.local, &ps.path.remote) != 0)
             break;
     }
 }
@@ -434,6 +541,10 @@ static void server_read_cb(EV_P_ ev_io *w, int revents) {
     msg.msg_name = &su;
     msg.msg_iov = &msg_iov;
     msg.msg_iovlen = 1;
+    
+    uint8_t msg_ctrl[64];
+    //uint8_t msg_ctrl[CMSG_SPACE(sizeof(uint8_t))];
+    msg.msg_control = msg_ctrl;
 
     uint32_t version;
     const uint8_t *dcid, *scid;
@@ -448,13 +559,31 @@ static void server_read_cb(EV_P_ ev_io *w, int revents) {
     ngtcp2_cid dcid_n, scid_n;
     dcid_init(&dcid_n);
     scid_init(&scid_n);
-    static ngtcp2_path_storage path;
+    //static ngtcp2_path_storage path;
+    struct ngtcp2_path path;
     struct ngtcp2_pkt_info pi;
 
-    int rv;
+    struct Address local_addr = {0};
 
+    int rv;
+    msg.msg_namelen = sizeof(su);
+    msg.msg_controllen = sizeof(msg_ctrl);
     while ((bytes_received = recvmsg(w->fd, &msg, 0)) != -1) {
         printf("Bytes received = %ld\n", bytes_received);
+        pi.ecn = msghdr_get_ecn(&msg, su.storage.ss_family);
+        rv = msghdr_get_local_addr(&local_addr, &msg, su.storage.ss_family);
+        if (rv) {
+            printf("Unable to obtain local address\n");
+            continue;
+        }
+        switch (local_addr.su.storage.ss_family) {
+            case AF_INET:
+                assert(AF_INET == s_addr.su.storage.ss_family);
+                local_addr.su.in.sin_port = s_addr.su.in.sin_port;
+                break;
+            default:
+                assert(0);
+        }
 
         /*TBD: Decoding might not be needed as we don't care about the data?*/
         rv = ngtcp2_pkt_decode_version_cid(&version, &dcid, &dcidlen, 
@@ -491,7 +620,12 @@ static void server_read_cb(EV_P_ ev_io *w, int revents) {
                 printf("Could not generate connection ID\n");
                 return;
             }
-            path_init(&path, 0, 0, 0, 0);
+            //path_init(&path, 0, 0, 0, 0);
+            path.local.addr     = &local_addr.su.sa;
+            path.local.addrlen  = local_addr.len;
+            path.remote.addr    = &su.sa;
+            path.remote.addrlen = msg.msg_namelen;
+
             ngtcp2_settings_default(&settings);
             settings.token.base = (uint8_t *)(hd.token.base);
             settings.token.len = hd.token.len;
@@ -539,7 +673,7 @@ static void server_read_cb(EV_P_ ev_io *w, int revents) {
                     return;
             }
         }
-        server_send_response(w, conn_wrapper, buf, bytes_received);
+        server_send_response(w, conn_wrapper, pi.ecn, buf, bytes_received);
     }
 }
 
