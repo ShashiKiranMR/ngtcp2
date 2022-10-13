@@ -639,7 +639,7 @@ static void server_read_cb(EV_P_ ev_io *w, int revents) {
             params.max_idle_timeout = 30 * NGTCP2_SECONDS;
             params.stateless_reset_token_present = 1;
             params.active_connection_id_limit = 7;
-            params.original_dcid = hd.scid;
+            params.original_dcid = hd.dcid;
             if (generate_secure_random(params.stateless_reset_token, sizeof(params.stateless_reset_token)) != 0) {
                 printf("Could not generate stateless reset token\n");
                 return;
