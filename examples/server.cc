@@ -1359,7 +1359,7 @@ int Handler::init(const Endpoint &ep, const Address &local_addr,
       nullptr, //::recv_stream_data,
       nullptr, //::acked_stream_data_offset,
       stream_open,
-      stream_close,
+      nullptr, // stream_close,
       nullptr, // recv_stateless_reset
       nullptr, // recv_retry
       nullptr, // extend_max_streams_bidi
@@ -1625,207 +1625,6 @@ int Handler::on_write() {
 
   return 0;
 }
-/*
-int Handler::write_streams() {
-  std::array<nghttp3_vec, 16> vec;
-  ngtcp2_path_storage ps, prev_ps;
-  uint32_t prev_ecn = 0;
-  size_t pktcnt = 0;
-  auto max_udp_payload_size = ngtcp2_conn_get_max_udp_payload_size(conn_);
-  auto path_max_udp_payload_size =
-      ngtcp2_conn_get_path_max_udp_payload_size(conn_);
-  size_t max_pktcnt =
-      std::min(static_cast<size_t>(64_k), ngtcp2_conn_get_send_quantum(conn_)) /
-      max_udp_payload_size;
-  uint8_t *bufpos = tx_.data.get();
-  ngtcp2_pkt_info pi;
-  size_t gso_size = 0;
-  auto ts = util::timestamp(loop_);
-
-  ngtcp2_path_storage_zero(&ps);
-  ngtcp2_path_storage_zero(&prev_ps);
-
-  if (config.cc_algo != NGTCP2_CC_ALGO_BBR &&
-      config.cc_algo != NGTCP2_CC_ALGO_BBR2) {
-    max_pktcnt =
-        std::min(max_pktcnt, static_cast<size_t>(config.max_gso_dgrams));
-  }
-
-  for (;;) {
-    int64_t stream_id = -1;
-    int fin = 0;
-    nghttp3_ssize sveccnt = 0;
-
-    if (httpconn_ && ngtcp2_conn_get_max_data_left(conn_)) {
-      sveccnt = nghttp3_conn_writev_stream(httpconn_, &stream_id, &fin,
-                                           vec.data(), vec.size());
-      if (sveccnt < 0) {
-        std::cerr << "nghttp3_conn_writev_stream: " << nghttp3_strerror(sveccnt)
-                  << std::endl;
-        ngtcp2_connection_close_error_set_application_error(
-            &last_error_, nghttp3_err_infer_quic_app_error_code(sveccnt),
-            nullptr, 0);
-        return handle_error();
-      }
-    }
-
-    ngtcp2_ssize ndatalen;
-    auto v = vec.data();
-    auto vcnt = static_cast<size_t>(sveccnt);
-
-    uint32_t flags = NGTCP2_WRITE_STREAM_FLAG_MORE;
-    if (fin) {
-      flags |= NGTCP2_WRITE_STREAM_FLAG_FIN;
-    }
-
-    auto nwrite = ngtcp2_conn_writev_stream(
-        conn_, &ps.path, &pi, bufpos, max_udp_payload_size, &ndatalen, flags,
-        stream_id, reinterpret_cast<const ngtcp2_vec *>(v), vcnt, ts);
-    if (nwrite < 0) {
-      switch (nwrite) {
-      case NGTCP2_ERR_STREAM_DATA_BLOCKED:
-        assert(ndatalen == -1);
-        nghttp3_conn_block_stream(httpconn_, stream_id);
-        continue;
-      case NGTCP2_ERR_STREAM_SHUT_WR:
-        assert(ndatalen == -1);
-        nghttp3_conn_shutdown_stream_write(httpconn_, stream_id);
-        continue;
-      case NGTCP2_ERR_WRITE_MORE:
-        assert(ndatalen >= 0);
-        if (auto rv =
-                nghttp3_conn_add_write_offset(httpconn_, stream_id, ndatalen);
-            rv != 0) {
-          std::cerr << "nghttp3_conn_add_write_offset: " << nghttp3_strerror(rv)
-                    << std::endl;
-          ngtcp2_connection_close_error_set_application_error(
-              &last_error_, nghttp3_err_infer_quic_app_error_code(rv), nullptr,
-              0);
-          return handle_error();
-        }
-        continue;
-      }
-
-      assert(ndatalen == -1);
-
-      std::cerr << "ngtcp2_conn_writev_stream: " << ngtcp2_strerror(nwrite)
-                << std::endl;
-      ngtcp2_connection_close_error_set_transport_error_liberr(
-          &last_error_, nwrite, nullptr, 0);
-      return handle_error();
-    } else if (ndatalen >= 0) {
-      if (auto rv =
-              nghttp3_conn_add_write_offset(httpconn_, stream_id, ndatalen);
-          rv != 0) {
-        std::cerr << "nghttp3_conn_add_write_offset: " << nghttp3_strerror(rv)
-                  << std::endl;
-        ngtcp2_connection_close_error_set_application_error(
-            &last_error_, nghttp3_err_infer_quic_app_error_code(rv), nullptr,
-            0);
-        return handle_error();
-      }
-    }
-
-    if (nwrite == 0) {
-      if (bufpos - tx_.data.get()) {
-        auto &ep = *static_cast<Endpoint *>(prev_ps.path.user_data);
-        auto data = tx_.data.get();
-        auto datalen = bufpos - data;
-
-        if (auto [nsent, rv] = server_->send_packet(
-                ep, no_gso_, prev_ps.path.local, prev_ps.path.remote, prev_ecn,
-                data, datalen, gso_size);
-            rv != NETWORK_ERR_OK) {
-          assert(NETWORK_ERR_SEND_BLOCKED == rv);
-
-          on_send_blocked(ep, prev_ps.path.local, prev_ps.path.remote, prev_ecn,
-                          data + nsent, datalen - nsent, gso_size);
-
-          start_wev_endpoint(ep);
-          ngtcp2_conn_update_pkt_tx_time(conn_, ts);
-          return 0;
-        }
-      }
-
-      ev_io_stop(loop_, &wev_);
-
-      // We are congestion limited.
-      ngtcp2_conn_update_pkt_tx_time(conn_, ts);
-      return 0;
-    }
-
-    bufpos += nwrite;
-
-    if (pktcnt == 0) {
-      ngtcp2_path_copy(&prev_ps.path, &ps.path);
-      prev_ecn = pi.ecn;
-      gso_size = nwrite;
-    } else if (!ngtcp2_path_eq(&prev_ps.path, &ps.path) || prev_ecn != pi.ecn ||
-               static_cast<size_t>(nwrite) > gso_size ||
-               (gso_size > path_max_udp_payload_size &&
-                static_cast<size_t>(nwrite) != gso_size)) {
-      auto &ep = *static_cast<Endpoint *>(prev_ps.path.user_data);
-      auto data = tx_.data.get();
-      auto datalen = bufpos - data - nwrite;
-
-      if (auto [nsent, rv] = server_->send_packet(
-              ep, no_gso_, prev_ps.path.local, prev_ps.path.remote, prev_ecn,
-              data, datalen, gso_size);
-          rv != 0) {
-        assert(NETWORK_ERR_SEND_BLOCKED == rv);
-
-        on_send_blocked(ep, prev_ps.path.local, prev_ps.path.remote, prev_ecn,
-                        data + nsent, datalen - nsent, gso_size);
-
-        on_send_blocked(*static_cast<Endpoint *>(ps.path.user_data),
-                        ps.path.local, ps.path.remote, pi.ecn, bufpos - nwrite,
-                        nwrite, 0);
-
-        start_wev_endpoint(ep);
-      } else {
-        auto &ep = *static_cast<Endpoint *>(ps.path.user_data);
-        auto data = bufpos - nwrite;
-
-        if (auto [nsent, rv] =
-                server_->send_packet(ep, no_gso_, ps.path.local, ps.path.remote,
-                                     pi.ecn, data, nwrite, nwrite);
-            rv != 0) {
-          assert(nsent == 0);
-          assert(NETWORK_ERR_SEND_BLOCKED == rv);
-
-          on_send_blocked(ep, ps.path.local, ps.path.remote, pi.ecn, data,
-                          nwrite, 0);
-        }
-
-        start_wev_endpoint(ep);
-      }
-
-      ngtcp2_conn_update_pkt_tx_time(conn_, ts);
-      return 0;
-    }
-
-    if (++pktcnt == max_pktcnt || static_cast<size_t>(nwrite) < gso_size) {
-      auto &ep = *static_cast<Endpoint *>(ps.path.user_data);
-      auto data = tx_.data.get();
-      auto datalen = bufpos - data;
-
-      if (auto [nsent, rv] =
-              server_->send_packet(ep, no_gso_, ps.path.local, ps.path.remote,
-                                   pi.ecn, data, datalen, gso_size);
-          rv != 0) {
-        assert(NETWORK_ERR_SEND_BLOCKED == rv);
-
-        on_send_blocked(ep, ps.path.local, ps.path.remote, pi.ecn, data + nsent,
-                        datalen - nsent, gso_size);
-      }
-
-      start_wev_endpoint(ep);
-      ngtcp2_conn_update_pkt_tx_time(conn_, ts);
-      return 0;
-    }
-  }
-}
-*/
 
 int Handler::write_streams() {
   std::array<ngtcp2_vec, 16> vec;
@@ -1860,13 +1659,12 @@ int Handler::write_streams() {
 
     ngtcp2_ssize ndatalen;
     auto v = vec.data();
-    size_t vcnt;
+    size_t vcnt = 16;
 
     uint32_t flags = NGTCP2_WRITE_STREAM_FLAG_MORE;
     if (fin) {
       flags |= NGTCP2_WRITE_STREAM_FLAG_FIN;
     }
-
     auto nwrite = ngtcp2_conn_writev_stream(
         conn_, &ps.path, &pi, bufpos, max_udp_payload_size, &ndatalen, flags,
         stream_id, reinterpret_cast<const ngtcp2_vec *>(v), vcnt, ts);

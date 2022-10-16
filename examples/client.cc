@@ -966,7 +966,7 @@ int Client::write_streams() {
 
     ngtcp2_ssize ndatalen;
     auto v = vec.data();
-    size_t vcnt;
+    size_t vcnt = 16;
 
     uint32_t flags = NGTCP2_WRITE_STREAM_FLAG_MORE;
     if (fin) {
