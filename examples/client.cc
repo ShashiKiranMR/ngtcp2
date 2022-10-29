@@ -47,6 +47,7 @@
 #include "debug.h"
 #include "util.h"
 #include "shared.h"
+#include <openssl/md5.h>
 
 using namespace ngtcp2;
 using namespace std::literals;
@@ -387,11 +388,12 @@ int stream_close(ngtcp2_conn *conn, uint32_t flags, int64_t stream_id,
                  uint64_t app_error_code, void *user_data,
                  void *stream_user_data) {
   auto c = static_cast<Client *>(user_data);
-
+  std::cout << "shashi: in stream_close\n";
+/*
   if (!(flags & NGTCP2_STREAM_CLOSE_FLAG_APP_ERROR_CODE_SET)) {
     app_error_code = NGHTTP3_H3_NO_ERROR;
   }
-/*
+
   if (c->on_stream_close(stream_id, app_error_code) != 0) {
     return NGTCP2_ERR_CALLBACK_FAILURE;
   }
@@ -405,11 +407,12 @@ int stream_reset(ngtcp2_conn *conn, int64_t stream_id, uint64_t final_size,
                  uint64_t app_error_code, void *user_data,
                  void *stream_user_data) {
   auto c = static_cast<Client *>(user_data);
-
+  std::cout << "shashi: in stream_reset\n";
+/*
   if (c->on_stream_reset(stream_id) != 0) {
     return NGTCP2_ERR_CALLBACK_FAILURE;
   }
-
+*/
   return 0;
 }
 } // namespace
@@ -570,11 +573,13 @@ int extend_max_stream_data(ngtcp2_conn *conn, int64_t stream_id,
 } // namespace
 
 int Client::extend_max_stream_data(int64_t stream_id, uint64_t max_data) {
+/*
   if (auto rv = nghttp3_conn_unblock_stream(httpconn_, stream_id); rv != 0) {
     std::cerr << "nghttp3_conn_unblock_stream: " << nghttp3_strerror(rv)
               << std::endl;
     return -1;
   }
+*/
   return 0;
 }
 
@@ -633,23 +638,23 @@ int Client::init(int fd, const Address &local_addr, const Address &remote_addr,
       ngtcp2_crypto_decrypt_cb,
       do_hp_mask,
       ::recv_stream_data,
-      nullptr, //::acked_stream_data_offset,
+      ::acked_stream_data_offset,
       nullptr, // stream_open
       stream_close,
       nullptr, // recv_stateless_reset
       ngtcp2_crypto_recv_retry_cb,
-      nullptr, // extend_max_streams_bidi,
+      extend_max_streams_bidi,
       nullptr, // extend_max_streams_uni
       rand,
       get_new_connection_id,
       remove_connection_id,
       ::update_key,
       path_validation,
-      ::select_preferred_address,
-      nullptr, //stream_reset,
+      nullptr, // ::select_preferred_address,
+      stream_reset,
       nullptr, // extend_max_remote_streams_bidi,
       nullptr, // extend_max_remote_streams_uni,
-      nullptr, // ::extend_max_stream_data,
+      ::extend_max_stream_data,
       nullptr, // dcid_status
       ::handshake_confirmed,
       ::recv_new_token,
@@ -659,7 +664,7 @@ int Client::init(int fd, const Address &local_addr, const Address &remote_addr,
       nullptr, // ack_datagram
       nullptr, // lost_datagram
       ngtcp2_crypto_get_path_challenge_data_cb,
-      nullptr, // stream_stop_sending,
+      stream_stop_sending,
       ngtcp2_crypto_version_negotiation_cb,
       ::recv_rx_key,
       nullptr, // recv_tx_key
@@ -947,7 +952,8 @@ int Client::on_write() {
 }
 
 int Client::write_streams() {
-  std::array<ngtcp2_vec, 16> vec;
+  std::string data = "shashi";
+  ngtcp2_vec vec;
   ngtcp2_path_storage ps;
   size_t pktcnt = 0;
   auto max_udp_payload_size = ngtcp2_conn_get_max_udp_payload_size(conn_);
@@ -965,8 +971,10 @@ int Client::write_streams() {
     int fin = 0;
 
     ngtcp2_ssize ndatalen;
-    auto v = vec.data();
-    size_t vcnt = 16;
+    //auto v = vec.data();
+    vec.base = (uint8_t *)&data;
+    vec.len = sizeof(char) * data.size();
+    size_t vcnt = 1;
 
     uint32_t flags = NGTCP2_WRITE_STREAM_FLAG_MORE;
     if (fin) {
@@ -974,10 +982,13 @@ int Client::write_streams() {
     }
 
     ngtcp2_pkt_info pi;
-
+    
+    if (streams_.size() > 0) {
+        stream_id = streams_.begin()->first;
+    }
     auto nwrite = ngtcp2_conn_writev_stream(
         conn_, &ps.path, &pi, tx_.data.data(), max_udp_payload_size, &ndatalen,
-        flags, stream_id, reinterpret_cast<const ngtcp2_vec *>(v), vcnt, ts);
+        flags, stream_id, reinterpret_cast<const ngtcp2_vec *>(&vec), vcnt, ts);
     if (nwrite < 0) {
       switch (nwrite) {
       case NGTCP2_ERR_STREAM_DATA_BLOCKED:
@@ -1032,6 +1043,10 @@ int Client::write_streams() {
       start_wev_endpoint(ep);
       return 0;
     }
+
+    /*shashi*/
+    if (stream_id != -1)
+        return 0;
   }
 }
 
@@ -1601,11 +1616,11 @@ int Client::on_extend_max_streams() {
 
     auto stream = std::make_unique<Stream>(
         config.requests[nstreams_done_ % config.requests.size()], stream_id);
-
+/*
     if (submit_http_request(stream.get()) != 0) {
       break;
     }
-
+*/
     if (!config.download.empty()) {
       stream->open_file(stream->req.path);
     }
@@ -1665,7 +1680,8 @@ int Client::submit_http_request(const Stream *stream) {
 
 int Client::recv_stream_data(uint32_t flags, int64_t stream_id,
                              const uint8_t *data, size_t datalen) {
-  auto nconsumed = nghttp3_conn_read_stream(
+/*
+    auto nconsumed = nghttp3_conn_read_stream(
       httpconn_, stream_id, data, datalen, flags & NGTCP2_STREAM_DATA_FLAG_FIN);
   if (nconsumed < 0) {
     std::cerr << "nghttp3_conn_read_stream: " << nghttp3_strerror(nconsumed)
@@ -1675,21 +1691,20 @@ int Client::recv_stream_data(uint32_t flags, int64_t stream_id,
         0);
     return -1;
   }
-
-  ngtcp2_conn_extend_max_stream_offset(conn_, stream_id, nconsumed);
-  ngtcp2_conn_extend_max_offset(conn_, nconsumed);
+*/
+  int i;
+  std::cout << "shashi: in recv_stream_data with datalen = " << datalen << "\n";
+  for (i=0; i<datalen; i++) {
+      printf("%x ", data[i]);
+  }
+  ngtcp2_conn_extend_max_stream_offset(conn_, stream_id, datalen);
+  ngtcp2_conn_extend_max_offset(conn_, datalen);
 
   return 0;
 }
 
 int Client::acked_stream_data_offset(int64_t stream_id, uint64_t datalen) {
-  if (auto rv = nghttp3_conn_add_ack_offset(httpconn_, stream_id, datalen);
-      rv != 0) {
-    std::cerr << "nghttp3_conn_add_ack_offset: " << nghttp3_strerror(rv)
-              << std::endl;
-    return -1;
-  }
-
+    std::cout << "shashi: in acked_stream_data_offset\n";
   return 0;
 }
 
