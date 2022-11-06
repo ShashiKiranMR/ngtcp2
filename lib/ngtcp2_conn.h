@@ -408,7 +408,7 @@ struct ngtcp2_conn {
     uint64_t zerolen_seq;
   } dcid;
 
-  struct {
+  struct { 
     /* set is a set of CID sent to peer.  The peer can use any CIDs in
        this set.  This includes used CID as well as unused ones. */
     ngtcp2_ksl set;

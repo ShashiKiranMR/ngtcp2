@@ -772,7 +772,7 @@ int acked_stream_data_offset(ngtcp2_conn *conn, int64_t stream_id,
                              uint64_t offset, uint64_t datalen, void *user_data,
                              void *stream_user_data) {
   auto h = static_cast<Handler *>(user_data);
-  std::cout << "shashi: in acked_stream_data_offset\n";
+  //std::cout << "shashi: in acked_stream_data_offset\n";
 /*  
   if (h->acked_stream_data_offset(stream_id, datalen) != 0) {
     return NGTCP2_ERR_CALLBACK_FAILURE;
@@ -863,7 +863,7 @@ int stream_stop_sending(ngtcp2_conn *conn, int64_t stream_id,
                         uint64_t app_error_code, void *user_data,
                         void *stream_user_data) {
   auto h = static_cast<Handler *>(user_data);
-  std::cout << "shashi: in stream_stop_sending\n";
+  //std::cout << "shashi: in stream_stop_sending\n";
 /*
   if (h->on_stream_stop_sending(stream_id) != 0) {
     return NGTCP2_ERR_CALLBACK_FAILURE;
@@ -1638,12 +1638,13 @@ int Handler::on_write() {
 }
 
 int Handler::write_streams() {
-  std::string data = "shashi";
+  //std::string data = "shashi";
   ngtcp2_vec vec;
   ngtcp2_path_storage ps, prev_ps;
   uint32_t prev_ecn = 0;
   size_t pktcnt = 0;
   auto max_udp_payload_size = ngtcp2_conn_get_max_udp_payload_size(conn_);
+  std::string data(max_udp_payload_size, 'a');
   auto path_max_udp_payload_size =
       ngtcp2_conn_get_path_max_udp_payload_size(conn_);
   size_t max_pktcnt =
@@ -1671,8 +1672,9 @@ int Handler::write_streams() {
 
     ngtcp2_ssize ndatalen;
     //auto v = vec.data();
-    vec.base = (uint8_t *)&data;
-    vec.len = sizeof(char) * data.size();
+    // vec.base = (uint8_t *)&data;
+    vec.base = (uint8_t *) (data.c_str());
+    vec.len = data.size();
     size_t vcnt = 1;
 
     uint32_t flags = NGTCP2_WRITE_STREAM_FLAG_MORE;
@@ -1805,8 +1807,6 @@ int Handler::write_streams() {
       ngtcp2_conn_update_pkt_tx_time(conn_, ts);
       return 0;
     }
-    if (stream_id != -1)
-        return 0;
   }
 }
 
@@ -2006,7 +2006,7 @@ void Handler::update_timer() {
 
 int Handler::recv_stream_data(uint32_t flags, int64_t stream_id,
                               const uint8_t *data, size_t datalen) {
-    std::cout << "shashi: in recv_stream_data\n";
+  //std::cout << "shashi: in recv_stream_data, dsize = " << datalen << "\n";
   if (!config.quiet && !config.no_quic_dump) {
     debug::print_stream_data(stream_id, data, datalen);
   }

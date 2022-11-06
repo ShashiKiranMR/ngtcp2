@@ -23,7 +23,7 @@
  * WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
  */
 #include "shared.h"
-
+#include <stdio.h>
 #ifdef WIN32
 #  include <winsock2.h>
 #  include <ws2tcpip.h>
@@ -765,6 +765,13 @@ int ngtcp2_crypto_encrypt_cb(uint8_t *dest, const ngtcp2_crypto_aead *aead,
                              const uint8_t *plaintext, size_t plaintextlen,
                              const uint8_t *nonce, size_t noncelen,
                              const uint8_t *aad, size_t aadlen) {
+  /*
+  int i;
+  printf("shashi: len of plain text = %ld\n", plaintextlen);
+  for (i=0; i<plaintextlen; i++) {
+      printf("%x ", dest[i]);
+  }
+  printf("\nshashi: done printing plain text data\n");*/
   if (ngtcp2_crypto_encrypt(dest, aead, aead_ctx, plaintext, plaintextlen,
                             nonce, noncelen, aad, aadlen) != 0) {
     return NGTCP2_ERR_CALLBACK_FAILURE;
@@ -777,10 +784,17 @@ int ngtcp2_crypto_decrypt_cb(uint8_t *dest, const ngtcp2_crypto_aead *aead,
                              const uint8_t *ciphertext, size_t ciphertextlen,
                              const uint8_t *nonce, size_t noncelen,
                              const uint8_t *aad, size_t aadlen) {
+  //int i;
   if (ngtcp2_crypto_decrypt(dest, aead, aead_ctx, ciphertext, ciphertextlen,
                             nonce, noncelen, aad, aadlen) != 0) {
     return NGTCP2_ERR_DECRYPT;
   }
+  /*
+  printf("shashi: len of decrypted pkt = %ld\n", ciphertextlen - aead->max_overhead);
+  for (i=0; i<ciphertextlen - aead->max_overhead; i++) {
+      printf("%x ", dest[i]);
+  }
+  printf("\nshashi: done printing devrypted pkt\n");*/
   return 0;
 }
 

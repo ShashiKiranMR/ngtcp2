@@ -49,6 +49,11 @@
 #include "shared.h"
 #include <openssl/md5.h>
 
+static int current_second = 0;
+static uint64_t bytes_received = 0;
+static bool first_receive = true;
+static ev_timer report_timer;
+
 using namespace ngtcp2;
 using namespace std::literals;
 
@@ -388,7 +393,7 @@ int stream_close(ngtcp2_conn *conn, uint32_t flags, int64_t stream_id,
                  uint64_t app_error_code, void *user_data,
                  void *stream_user_data) {
   auto c = static_cast<Client *>(user_data);
-  std::cout << "shashi: in stream_close\n";
+  //std::cout << "shashi: in stream_close\n";
 /*
   if (!(flags & NGTCP2_STREAM_CLOSE_FLAG_APP_ERROR_CODE_SET)) {
     app_error_code = NGHTTP3_H3_NO_ERROR;
@@ -407,7 +412,7 @@ int stream_reset(ngtcp2_conn *conn, int64_t stream_id, uint64_t final_size,
                  uint64_t app_error_code, void *user_data,
                  void *stream_user_data) {
   auto c = static_cast<Client *>(user_data);
-  std::cout << "shashi: in stream_reset\n";
+  //std::cout << "shashi: in stream_reset\n";
 /*
   if (c->on_stream_reset(stream_id) != 0) {
     return NGTCP2_ERR_CALLBACK_FAILURE;
@@ -952,11 +957,12 @@ int Client::on_write() {
 }
 
 int Client::write_streams() {
-  std::string data = "shashi";
+  //std::string data = "shashi";
   ngtcp2_vec vec;
   ngtcp2_path_storage ps;
   size_t pktcnt = 0;
   auto max_udp_payload_size = ngtcp2_conn_get_max_udp_payload_size(conn_);
+  std::string data(max_udp_payload_size, 'a');
   size_t max_pktcnt =
       (config.cc_algo == NGTCP2_CC_ALGO_BBR ||
        config.cc_algo == NGTCP2_CC_ALGO_BBR2)
@@ -972,8 +978,9 @@ int Client::write_streams() {
 
     ngtcp2_ssize ndatalen;
     //auto v = vec.data();
-    vec.base = (uint8_t *)&data;
-    vec.len = sizeof(char) * data.size();
+    //vec.base = (uint8_t *)&data;
+    vec.base = (uint8_t *) (data.c_str());
+    vec.len = data.size();
     size_t vcnt = 1;
 
     uint32_t flags = NGTCP2_WRITE_STREAM_FLAG_MORE;
@@ -1043,10 +1050,6 @@ int Client::write_streams() {
       start_wev_endpoint(ep);
       return 0;
     }
-
-    /*shashi*/
-    if (stream_id != -1)
-        return 0;
   }
 }
 
@@ -1678,6 +1681,29 @@ int Client::submit_http_request(const Stream *stream) {
   return 0;
 }
 
+void format_size(char *dst, double bytes) {
+    bytes *= 8;
+    const char *suffixes[] = {"bit/s", "kbit/s", "mbit/s", "gbit/s"};
+    int i = 0;
+    while(i < 4 && bytes > 1024) {
+        bytes /= 1024;
+        i++;
+    }
+    sprintf(dst, "%.4g %s", bytes, suffixes[i]);
+}
+
+namespace {
+static void report_cb(EV_P_ ev_timer *w, int revents) {
+    char size_str[100];
+    format_size(size_str, bytes_received);
+                    
+    std::cout << "second " << current_second << ": " << size_str << " (" << bytes_received << " bytes received)\n" << std::flush;
+    //std::cout << "second " << current_second << ": " << bytes_received << " bytes received\n" << std::flush;
+    ++current_second;
+    bytes_received = 0;
+}
+}
+
 int Client::recv_stream_data(uint32_t flags, int64_t stream_id,
                              const uint8_t *data, size_t datalen) {
 /*
@@ -1692,19 +1718,30 @@ int Client::recv_stream_data(uint32_t flags, int64_t stream_id,
     return -1;
   }
 */
-  int i;
-  std::cout << "shashi: in recv_stream_data with datalen = " << datalen << "\n";
+  //int i;
+  //std::cout << "shashi: in recv_stream_data with datalen = " << datalen << "\n";
+  /*
   for (i=0; i<datalen; i++) {
       printf("%x ", data[i]);
   }
+  */
+  if (first_receive) {
+      bytes_received = 0;
+      first_receive = false;
+      ev_timer_init(&report_timer, report_cb, 1.0, 1.0);
+      ev_timer_start(ev_default_loop(0), &report_timer);
+  }
+
   ngtcp2_conn_extend_max_stream_offset(conn_, stream_id, datalen);
   ngtcp2_conn_extend_max_offset(conn_, datalen);
 
+  bytes_received += datalen;
+  
   return 0;
 }
 
 int Client::acked_stream_data_offset(int64_t stream_id, uint64_t datalen) {
-    std::cout << "shashi: in acked_stream_data_offset\n";
+  //std::cout << "shashi: in acked_stream_data_offset\n";
   return 0;
 }
 
