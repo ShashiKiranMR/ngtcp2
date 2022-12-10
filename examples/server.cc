@@ -763,6 +763,12 @@ int recv_stream_data(ngtcp2_conn *conn, uint32_t flags, int64_t stream_id,
     return NGTCP2_ERR_CALLBACK_FAILURE;
   }
 
+  /* shashi: directly invoking write instead of callbacks 
+  if (h->on_write()) {
+      std::cout << "Error in recv_stream_data\n";
+  }
+  */
+
   return 0;
 }
 } // namespace
@@ -772,7 +778,6 @@ int acked_stream_data_offset(ngtcp2_conn *conn, int64_t stream_id,
                              uint64_t offset, uint64_t datalen, void *user_data,
                              void *stream_user_data) {
   auto h = static_cast<Handler *>(user_data);
-  //std::cout << "shashi: in acked_stream_data_offset\n";
 /*  
   if (h->acked_stream_data_offset(stream_id, datalen) != 0) {
     return NGTCP2_ERR_CALLBACK_FAILURE;
@@ -801,6 +806,14 @@ namespace {
 int stream_open(ngtcp2_conn *conn, int64_t stream_id, void *user_data) {
   auto h = static_cast<Handler *>(user_data);
   h->on_stream_open(stream_id);
+
+  /* shashi: moving the logic in recv_stream_data to here
+   * to remove that callback
+    if (ngtcp2_is_bidi_stream(stream_id)) {
+        size_t datalen = ngtcp2_conn_get_path_max_udp_payload_size(conn) * 16;
+        ngtcp2_conn_extend_max_stream_offset(conn, stream_id, datalen);
+        ngtcp2_conn_extend_max_offset(conn, datalen);
+    } */
   return 0;
 }
 } // namespace
@@ -863,7 +876,6 @@ int stream_stop_sending(ngtcp2_conn *conn, int64_t stream_id,
                         uint64_t app_error_code, void *user_data,
                         void *stream_user_data) {
   auto h = static_cast<Handler *>(user_data);
-  //std::cout << "shashi: in stream_stop_sending\n";
 /*
   if (h->on_stream_stop_sending(stream_id) != 0) {
     return NGTCP2_ERR_CALLBACK_FAILURE;
@@ -1368,8 +1380,8 @@ int Handler::init(const Endpoint &ep, const Address &local_addr,
       ngtcp2_crypto_encrypt_cb,
       ngtcp2_crypto_decrypt_cb,
       do_hp_mask,
-      ::recv_stream_data,
-      ::acked_stream_data_offset,
+      ::recv_stream_data, 
+      nullptr, //::acked_stream_data_offset, shashi: commenting this
       stream_open,
       stream_close,
       nullptr, // recv_stateless_reset
@@ -1380,12 +1392,12 @@ int Handler::init(const Endpoint &ep, const Address &local_addr,
       get_new_connection_id,
       remove_connection_id,
       ::update_key,
-      path_validation,
+      nullptr, // path_validation, shashi: commenting this
       nullptr, // select_preferred_addr
-      stream_reset,
-      ::extend_max_remote_streams_bidi,
+      nullptr, // stream_reset, shashi: commenting this
+      nullptr, // ::extend_max_remote_streams_bidi, shashi: commenting this
       nullptr, // extend_max_remote_streams_uni
-      ::extend_max_stream_data,
+      nullptr, // ::extend_max_stream_data, shashi: commenting this
       nullptr, // dcid_status
       nullptr, // handshake_confirmed
       nullptr, // recv_new_token
@@ -1395,7 +1407,7 @@ int Handler::init(const Endpoint &ep, const Address &local_addr,
       nullptr, // ack_datagram
       nullptr, // lost_datagram
       ngtcp2_crypto_get_path_challenge_data_cb,
-      stream_stop_sending,
+      nullptr, // stream_stop_sending, shashi: commenting this
       ngtcp2_crypto_version_negotiation_cb,
       nullptr, // recv_rx_key
       ::recv_tx_key,
@@ -1632,19 +1644,26 @@ int Handler::on_write() {
     return rv;
   }
 
+  /* shashi: trying to call write_streams twice
+   * this increased the throughput by 100 mbps */
+  if (auto rv = write_streams(); rv != 0) {
+    return rv;
+  }
+  
+
   update_timer();
 
   return 0;
 }
 
 int Handler::write_streams() {
-  //std::string data = "shashi";
   ngtcp2_vec vec;
   ngtcp2_path_storage ps, prev_ps;
   uint32_t prev_ecn = 0;
   size_t pktcnt = 0;
   auto max_udp_payload_size = ngtcp2_conn_get_max_udp_payload_size(conn_);
-  std::string data(max_udp_payload_size, 'a');
+  //std::string data(max_udp_payload_size * 16, 'a');
+  char data[max_udp_payload_size * 16];
   auto path_max_udp_payload_size =
       ngtcp2_conn_get_path_max_udp_payload_size(conn_);
   size_t max_pktcnt =
@@ -1673,8 +1692,10 @@ int Handler::write_streams() {
     ngtcp2_ssize ndatalen;
     //auto v = vec.data();
     // vec.base = (uint8_t *)&data;
-    vec.base = (uint8_t *) (data.c_str());
-    vec.len = data.size();
+    //vec.base = (uint8_t *) (data.c_str());
+    //vec.len = data.size();
+    vec.base = (uint8_t *) data;
+    vec.len = sizeof(data);
     size_t vcnt = 1;
 
     uint32_t flags = NGTCP2_WRITE_STREAM_FLAG_MORE;
@@ -1802,7 +1823,8 @@ int Handler::write_streams() {
         on_send_blocked(ep, ps.path.local, ps.path.remote, pi.ecn, data + nsent,
                         datalen - nsent, gso_size);
       }
-
+      /* Instead of starting the write event again, wait for the client to 
+       * send data. That would invoke write again, hence commenting below line */
       start_wev_endpoint(ep);
       ngtcp2_conn_update_pkt_tx_time(conn_, ts);
       return 0;
@@ -2006,7 +2028,6 @@ void Handler::update_timer() {
 
 int Handler::recv_stream_data(uint32_t flags, int64_t stream_id,
                               const uint8_t *data, size_t datalen) {
-  //std::cout << "shashi: in recv_stream_data, dsize = " << datalen << "\n";
   if (!config.quiet && !config.no_quic_dump) {
     debug::print_stream_data(stream_id, data, datalen);
   }
@@ -2579,7 +2600,8 @@ int Server::on_read(Endpoint &ep) {
       }
       continue;
     }
-
+    /* shashi: commenting below line to avoid write via events. Instead,
+     * write_streams is directly invoked from recv_stream_data */
     h->signal_write();
   }
 
@@ -2865,7 +2887,7 @@ Server::send_packet(Endpoint &ep, bool &no_gso, const ngtcp2_addr &local_addr,
     }
     return {0, NETWORK_ERR_OK};
   }
-
+  no_gso = true; // shashi TODO: remove this
   if (no_gso && datalen > gso_size) {
     size_t nsent = 0;
 

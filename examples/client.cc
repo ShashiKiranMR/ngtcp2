@@ -654,12 +654,12 @@ int Client::init(int fd, const Address &local_addr, const Address &remote_addr,
       get_new_connection_id,
       remove_connection_id,
       ::update_key,
-      path_validation,
+      nullptr, // path_validation, shashi: commenting this
       nullptr, // ::select_preferred_address,
       stream_reset,
       nullptr, // extend_max_remote_streams_bidi,
       nullptr, // extend_max_remote_streams_uni,
-      ::extend_max_stream_data,
+      nullptr, // ::extend_max_stream_data, shashi: commenting this
       nullptr, // dcid_status
       ::handshake_confirmed,
       ::recv_new_token,
@@ -669,7 +669,7 @@ int Client::init(int fd, const Address &local_addr, const Address &remote_addr,
       nullptr, // ack_datagram
       nullptr, // lost_datagram
       ngtcp2_crypto_get_path_challenge_data_cb,
-      stream_stop_sending,
+      nullptr, // stream_stop_sending, shashi: commenting this
       ngtcp2_crypto_version_negotiation_cb,
       ::recv_rx_key,
       nullptr, // recv_tx_key
@@ -962,7 +962,8 @@ int Client::write_streams() {
   ngtcp2_path_storage ps;
   size_t pktcnt = 0;
   auto max_udp_payload_size = ngtcp2_conn_get_max_udp_payload_size(conn_);
-  std::string data(max_udp_payload_size, 'a');
+  //std::string data(max_udp_payload_size, 'a');
+  char data[max_udp_payload_size];
   size_t max_pktcnt =
       (config.cc_algo == NGTCP2_CC_ALGO_BBR ||
        config.cc_algo == NGTCP2_CC_ALGO_BBR2)
@@ -979,8 +980,10 @@ int Client::write_streams() {
     ngtcp2_ssize ndatalen;
     //auto v = vec.data();
     //vec.base = (uint8_t *)&data;
-    vec.base = (uint8_t *) (data.c_str());
-    vec.len = data.size();
+    //vec.base = (uint8_t *) (data.c_str());
+    //vec.len = data.size();
+    vec.base = (uint8_t *)data;
+    vec.len = sizeof(data);
     size_t vcnt = 1;
 
     uint32_t flags = NGTCP2_WRITE_STREAM_FLAG_MORE;
