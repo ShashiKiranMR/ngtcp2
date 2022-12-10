@@ -388,6 +388,7 @@ Using document root /proj/quic-server-PG0/users/sravi/ngtcp2/examples/
 ```
 
 * Starting the client:
+    * Just mention some http request in the end. It will not be used anywhere but will make the client send the data that we want. It is a hack for now.
 ```
 sravi@node-0:/proj/quic-server-PG0/users/sravi/ngtcp2/examples$ ./client -q 128.110.218.234 18080 https://128.110.218.234:18080/
 second 0: 1.046 gbit/s (140393429 bytes received)
@@ -724,9 +725,44 @@ event loop data structures:
         * Throughput is around 900 mbps
 
  * Possible reasons for this throughput reduction:
-    - Missing any write event that was there earlier.
+    - Missing any write event that was there earlier. Handled this and the throughput increased slightly.
+
     - The changes done are only on the server, so maybe changing the client will help.
+        * on_write() is invoked by writecb, readcb, and one time once the client starts and is ready.
+        * writecb is invoked when write_streams reaches max pkt count.
+        * readcb is invoked when client receives any pkt.
+        * Hence, no changes on client needed as the main invocation is sync call instead of events like server.
+        
     - The place where the event is replaced with a direct call may not be the right way. If it changes the logic of the initial code then its not the right way of invoking the call directly.
+        * Yeah it alters the flow of the server. Server was earlier activating the write event and wait for reading 10 packets and only then return. Now calling directly for every packet will change this flow.
+        * Remove un-necessary callbacks from the connection. Done. Because of this epoll_wait has reduced to 1.78% of the cpu.
+        * In the read and write funtions, check if any optional processing can be removed.
+        * Try invoking write_streams() twice in on_write() function and see if the throughput increases.
+
+    - Throughput after the above changes has increased by 300 mbps.
+    - Please refer the flame graph [here](https://github.com/ShashiKiranMR/ngtcp2/blob/dev/flame_graphs/ngtcp2_ptls_server_write_events_latest.svg).
+    - All the flame graphs can be found [here](https://github.com/ShashiKiranMR/ngtcp2/tree/dev/flame_graphs).
+```
+sravi@node-0:/proj/quic-server-PG0/users/sravi/ngtcp2/examples./ptlsclient -q 10.10.1.2 18080 https://10.10.1.2:18080/
+second 0: 1.562 gbit/s (209690068 bytes received)
+second 1: 1.501 gbit/s (201398102 bytes received)
+second 2: 1.422 gbit/s (190888912 bytes received)
+second 3: 1.42 gbit/s (190602306 bytes received)
+second 4: 1.48 gbit/s (198674887 bytes received)
+second 5: 1.456 gbit/s (195476237 bytes received)
+second 6: 1.438 gbit/s (192973821 bytes received)
+second 7: 1.476 gbit/s (198130820 bytes received)
+second 8: 1.468 gbit/s (197049326 bytes received)
+second 9: 1.494 gbit/s (200521916 bytes received)
+second 10: 1.452 gbit/s (194869785 bytes received)
+```
+    
+- timeoutcb is also invoking on_write(). Understand why this is happens.
+    * Initially timer is configured with 'after' and 'repeat' as 0.
+    * In on_read() and on_write(), timer is updated using the connection expiry time.
+    * ngtcp2_conn_get_send_quantum() returns the number of bytes that can be sent without packet spacing.
+    * After one or more calls of ngtcp2_conn_writev_stream(), ngtcp2_conn_update_pkt_tx_time() has to be called. This will set the timer on when the next packet should be sent.
+    * We can get this value in future by calling ngtcp2_conn_get_expiry(). This is called in update_timer() that is called on every read and write of a quic packet.
 
 ## Annexure
 
